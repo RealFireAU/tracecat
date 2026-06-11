@@ -43,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
     from tracecat.agent.schemas import RunAgentArgs
     from tracecat.agent.session.types import AgentSessionEntity
     from tracecat.agent.types import AgentConfig
+    from tracecat.auth.workflow_identities import mint_workflow_identity_token
     from tracecat.concurrency import cooperative
     from tracecat.contexts import (
         ctx_interaction,
@@ -604,6 +605,20 @@ class DSLWorkflow:
                 retry_policy=RETRY_POLICIES["activity:fail_fast"],
             )
 
+        # Mint workflow identity token if enabled
+        identity_cfg = self.runtime_config.identity
+        workflow_identity_token: str | None = None
+        if identity_cfg.enabled:
+            workflow_identity_token = mint_workflow_identity_token(
+                workspace_id=self.workspace_id,
+                organization_id=self.organization_id,
+                wf_id=args.wf_id,
+                wf_exec_id=wf_info.workflow_id,
+                wf_run_id=wf_info.run_id,
+                audiences=identity_cfg.audiences or [],
+                ttl_seconds=identity_cfg.ttl_seconds,
+            )
+
         # Prepare user facing context
         # trigger_inputs is already a StoredObject from args or normalize_trigger_inputs_activity
         # TRIGGER is always present - None signals no trigger inputs were provided
@@ -618,6 +633,7 @@ class DSLWorkflow:
                     "execution_id": self.wf_exec_id,
                     "run_id": self.wf_run_id,
                     "trigger_type": get_trigger_type(wf_info),
+                    "identity_token": workflow_identity_token,
                 },
                 environment=self.runtime_config.environment,
                 variables={},
@@ -632,6 +648,7 @@ class DSLWorkflow:
             wf_run_id=uuid.UUID(wf_info.run_id, version=4),
             environment=self.runtime_config.environment,
             logical_time=self.time_anchor,
+            workflow_identity_token=workflow_identity_token,
         )
         ctx_run.set(self.run_context)
 

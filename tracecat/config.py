@@ -95,6 +95,14 @@ TRACECAT__PUBLIC_APP_URL = os.environ.get(
     "TRACECAT__PUBLIC_APP_URL", "http://localhost"
 )
 
+TRACECAT__HOSTNAME = os.environ.get("TRACECAT__HOSTNAME", "")
+"""Hostname used as the issuer and subject base for workflow identity tokens."""
+
+TRACECAT__WORKFLOW_IDENTITY_TOKEN_TTL_SECONDS = int(
+    os.environ.get("TRACECAT__WORKFLOW_IDENTITY_TOKEN_TTL_SECONDS") or 900
+)
+"""Default TTL for minted workflow identity tokens (seconds)."""
+
 TRACECAT__LOOP_MAX_BATCH_SIZE = int(
     os.environ.get("TRACECAT__LOOP_MAX_BATCH_SIZE") or 64
 )
