@@ -11316,6 +11316,11 @@ export const $DSLConfig_Input = {
         "Workflow timeout in seconds. If set to 0, the workflow has no timeout.",
       default: 0,
     },
+    identity: {
+      $ref: "#/components/schemas/WorkflowIdentityConfig",
+      description:
+        "Workflow identity token configuration for external IDP trust",
+    },
   },
   type: "object",
   title: "DSLConfig",
@@ -11339,6 +11344,11 @@ export const $DSLConfig_Output = {
       description:
         "Workflow timeout in seconds. If set to 0, the workflow has no timeout.",
       default: 0,
+    },
+    identity: {
+      $ref: "#/components/schemas/WorkflowIdentityConfig",
+      description:
+        "Workflow identity token configuration for external IDP trust",
     },
   },
   type: "object",
@@ -20550,6 +20560,19 @@ export const $RunContext = {
       type: "string",
       format: "date-time",
       title: "Logical Time",
+    },
+    workflow_identity_token: {
+      anyOf: [
+        {
+          type: "string",
+        },
+        {
+          type: "null",
+        },
+      ],
+      title: "Workflow Identity Token",
+      description:
+        "JWT token for external IDP trust, if workflow has identity config enabled. This token is available to actions via ENV.workflow.identity_token.",
     },
   },
   type: "object",
@@ -30101,6 +30124,35 @@ export const $WorkflowFolderUpdate = {
   },
   type: "object",
   title: "WorkflowFolderUpdate",
+} as const
+
+export const $WorkflowIdentityConfig = {
+  properties: {
+    enabled: {
+      type: "boolean",
+      title: "Enabled",
+      description:
+        "Whether to mint and inject a workflow identity token for this execution",
+      default: false,
+    },
+    audiences: {
+      items: {
+        type: "string",
+      },
+      type: "array",
+      title: "Audiences",
+      description:
+        "External IDPs that will accept this token (e.g., ['https://login.microsoftonline.com', 'https://sts.amazonaws.com']). Empty list means token can be validated by any IDP with the public key.",
+    },
+  },
+  type: "object",
+  title: "WorkflowIdentityConfig",
+  description: `Configuration for issuing a workflow identity token for external IDP trust.
+
+When enabled, Tracecat mints a JWT that external identity providers
+(Azure Entra, AWS STS, GCP, etc.) can validate and exchange for access tokens.
+
+The token is available to actions via ENV.workflow.identity_token.`,
 } as const
 
 export const $WorkflowMoveToFolder = {

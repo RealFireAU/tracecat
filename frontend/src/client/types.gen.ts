@@ -3283,6 +3283,10 @@ export type DSLConfig_Input = {
    * Workflow timeout in seconds. If set to 0, the workflow has no timeout.
    */
   timeout?: number
+  /**
+   * Workflow identity token configuration for external IDP trust
+   */
+  identity?: WorkflowIdentityConfig
 }
 
 /**
@@ -3304,6 +3308,10 @@ export type DSLConfig_Output = {
    * Workflow timeout in seconds. If set to 0, the workflow has no timeout.
    */
   timeout?: number
+  /**
+   * Workflow identity token configuration for external IDP trust
+   */
+  identity?: WorkflowIdentityConfig
 }
 
 export type DSLEntrypoint = {
@@ -6244,6 +6252,10 @@ export type RunContext = {
   wf_run_id: string
   environment: string
   logical_time: string
+  /**
+   * JWT token for external IDP trust, if workflow has identity config enabled. This token is available to actions via ENV.workflow.identity_token.
+   */
+  workflow_identity_token?: string | null
 }
 
 /**
@@ -8976,6 +8988,25 @@ export type WorkflowFolderRead = {
 
 export type WorkflowFolderUpdate = {
   name?: string | null
+}
+
+/**
+ * Configuration for issuing a workflow identity token for external IDP trust.
+ *
+ * When enabled, Tracecat mints a JWT that external identity providers
+ * (Azure Entra, AWS STS, GCP, etc.) can validate and exchange for access tokens.
+ *
+ * The token is available to actions via ENV.workflow.identity_token.
+ */
+export type WorkflowIdentityConfig = {
+  /**
+   * Whether to mint and inject a workflow identity token for this execution
+   */
+  enabled?: boolean
+  /**
+   * External IDPs that will accept this token (e.g., ['https://login.microsoftonline.com', 'https://sts.amazonaws.com']). Empty list means token can be validated by any IDP with the public key.
+   */
+  audiences?: Array<string>
 }
 
 export type WorkflowMoveToFolder = {
@@ -12753,6 +12784,16 @@ export type McpIntegrationsDisconnectMcpIntegrationData = {
 }
 
 export type McpIntegrationsDisconnectMcpIntegrationResponse = void
+
+export type WorkflowIdentityOidcOpenidConfigurationResponse = {
+  [key: string]: unknown
+}
+
+export type WorkflowIdentityOidcJwksResponse = {
+  [key: string]: Array<{
+    [key: string]: string
+  }>
+}
 
 export type FeatureFlagsGetFeatureFlagsResponse = FeatureFlagsRead
 
@@ -18877,6 +18918,32 @@ export type $OpenApiTs = {
          * Validation Error
          */
         422: HTTPValidationError
+      }
+    }
+  }
+  "/oauth/workflow/.well-known/openid-configuration": {
+    get: {
+      res: {
+        /**
+         * Successful Response
+         */
+        200: {
+          [key: string]: unknown
+        }
+      }
+    }
+  }
+  "/oauth/workflow/.well-known/jwks.json": {
+    get: {
+      res: {
+        /**
+         * Successful Response
+         */
+        200: {
+          [key: string]: Array<{
+            [key: string]: string
+          }>
+        }
       }
     }
   }

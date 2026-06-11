@@ -26,6 +26,7 @@ import {
 import { ControlledYamlField } from "@/components/builder/panel/action-panel-fields"
 import { CopyButton } from "@/components/copy-button"
 import { CenteredSpinner } from "@/components/loading/spinner"
+import { MultiTagCommandInput } from "@/components/tags-input"
 import { SimpleEditor } from "@/components/tiptap-templates/simple/simple-editor"
 import {
   AlertDialog,
@@ -49,6 +50,7 @@ import {
 import {
   Form,
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
@@ -62,6 +64,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
+import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Tooltip,
@@ -104,6 +107,9 @@ const createWorkflowUpdateFormSchema = (workspaceId: string) =>
           message: "Timeout cannot exceed 14 days (1209600 seconds)",
         })
         .optional(),
+      /* Identity */
+      identity_enabled: z.boolean().optional(),
+      identity_audiences: z.array(z.string()).optional(),
       /* Input Schema */
       expects: z
         .record(
@@ -428,6 +434,8 @@ function WorkflowSettingsPanel({
       alias: workflow.alias,
       environment: workflow.config?.environment || "default",
       timeout: workflow.config?.timeout || 0,
+      identity_enabled: workflow.config?.identity?.enabled ?? false,
+      identity_audiences: workflow.config?.identity?.audiences ?? [],
       // Use undefined for empty objects so the YAML editor shows empty instead of {}
       expects:
         workflow.expects && Object.keys(workflow.expects).length > 0
@@ -447,6 +455,10 @@ function WorkflowSettingsPanel({
           config: {
             environment: values.environment,
             timeout: values.timeout,
+            identity: {
+              enabled: values.identity_enabled,
+              audiences: values.identity_audiences,
+            },
           },
         }
 
@@ -768,6 +780,119 @@ function WorkflowSettingsPanel({
                 </FormItem>
               )}
             />
+
+            {/* Workflow identity */}
+            <FormField
+              name="identity_enabled"
+              control={methods.control}
+              render={({ field }) => (
+                <FormItem className="flex items-center justify-between gap-4 rounded-md border p-3">
+                  <div className="space-y-1">
+                    <FormLabel className="flex items-center text-xs">
+                      <HoverCard openDelay={100} closeDelay={100}>
+                        <HoverCardTrigger asChild className="hover:border-none">
+                          <Info className="mr-1 size-3 stroke-muted-foreground" />
+                        </HoverCardTrigger>
+                        <HoverCardContent
+                          className="w-[300px] p-3 font-mono text-xs tracking-tight"
+                          side="left"
+                          sideOffset={20}
+                        >
+                          <div className="w-full space-y-4">
+                            <div className="flex w-full items-center justify-between text-muted-foreground">
+                              <span className="font-mono text-sm font-semibold">
+                                Workload identity
+                              </span>
+                              <span className="text-xs text-muted-foreground/80">
+                                (optional)
+                              </span>
+                            </div>
+                            <span className="text-muted-foreground">
+                              When enabled, Tracecat mints a short-lived ES256
+                              JWT at workflow start. Actions can exchange it
+                              with external identity providers (Azure, AWS, GCP)
+                              for access tokens without storing long-lived
+                              credentials. Available as{" "}
+                              <code>ENV.workflow.identity_token</code>.
+                            </span>
+                          </div>
+                        </HoverCardContent>
+                      </HoverCard>
+                      <span>Workload identity</span>
+                    </FormLabel>
+                    <FormDescription className="text-xs">
+                      Mint a signed JWT for token exchange with external IDPs.
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      checked={field.value ?? false}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+
+            {methods.watch("identity_enabled") && (
+              <FormField
+                name="identity_audiences"
+                control={methods.control}
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="flex items-center text-xs">
+                      <HoverCard openDelay={100} closeDelay={100}>
+                        <HoverCardTrigger asChild className="hover:border-none">
+                          <Info className="mr-1 size-3 stroke-muted-foreground" />
+                        </HoverCardTrigger>
+                        <HoverCardContent
+                          className="w-[300px] p-3 font-mono text-xs tracking-tight"
+                          side="left"
+                          sideOffset={20}
+                        >
+                          <div className="w-full space-y-4">
+                            <div className="flex w-full items-center justify-between text-muted-foreground">
+                              <span className="font-mono text-sm font-semibold">
+                                IDP audiences
+                              </span>
+                              <span className="text-xs text-muted-foreground/80">
+                                (optional)
+                              </span>
+                            </div>
+                            <span className="text-muted-foreground">
+                              The external identity providers that will accept
+                              this token. Each entry becomes an <code>aud</code>{" "}
+                              claim in the JWT (e.g.{" "}
+                              <code>
+                                https://login.microsoftonline.com/
+                                {"<tenant-id>"}
+                              </code>
+                              ).
+                            </span>
+                          </div>
+                        </HoverCardContent>
+                      </HoverCard>
+                      <span>IDP audiences</span>
+                    </FormLabel>
+                    <FormControl>
+                      <MultiTagCommandInput
+                        value={field.value ?? []}
+                        onChange={field.onChange}
+                        placeholder="Add audience URL..."
+                        allowCustomTags
+                        disableSuggestions
+                        className="w-full text-xs"
+                        searchKeys={["label"]}
+                      />
+                    </FormControl>
+                    <FormDescription className="text-xs">
+                      Press Enter to add each audience URL.
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            )}
 
             {/* Input schema */}
             <FormItem>
