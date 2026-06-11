@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -33,28 +33,28 @@ def patch_public_api_url():
 
 @pytest.fixture(autouse=True)
 def patch_signing(patch_public_api_url):
-    """Patch MCP OIDC signing with a real ephemeral P-256 key for tests."""
-    from cryptography.hazmat.primitives.asymmetric.ec import (
-        SECP256R1,
-        generate_private_key,
-    )
+    """Patch workflow identity signing with an ephemeral RSA-2048 key for tests."""
+    from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
 
-    private_key = generate_private_key(SECP256R1())
+    private_key = generate_private_key(public_exponent=65537, key_size=2048)
     public_key = private_key.public_key()
 
     import jwt as pyjwt
 
     def fake_mint_jwt(claims):
-        return pyjwt.encode(claims, private_key, algorithm="ES256")
+        return pyjwt.encode(claims, private_key, algorithm="RS256")
 
-    mock_jwk = MagicMock()
-    mock_jwk.__getitem__ = lambda self, k: "test-kid" if k == "kid" else None
+    def fake_verify_jwt(token, *, audience=None):
+        opts = {} if audience is not None else {"verify_aud": False}
+        kwargs = {"algorithms": ["RS256"], "options": opts}
+        if audience is not None:
+            kwargs["audience"] = audience
+        return pyjwt.decode(token, public_key, **kwargs)
 
     with (
         patch("tracecat.auth.workflow_identities.mint_jwt", side_effect=fake_mint_jwt),
         patch(
-            "tracecat.auth.workflow_identities.get_signing_key",
-            return_value=MagicMock(public_key=lambda: public_key),
+            "tracecat.auth.workflow_identities.verify_jwt", side_effect=fake_verify_jwt
         ),
     ):
         yield private_key, public_key
@@ -64,7 +64,7 @@ def _decode(token, public_key):
     import jwt as pyjwt
 
     return pyjwt.decode(
-        token, public_key, algorithms=["ES256"], options={"verify_aud": False}
+        token, public_key, algorithms=["RS256"], options={"verify_aud": False}
     )
 
 
@@ -166,19 +166,14 @@ class TestVerifyWorkflowIdentityToken:
 
     def test_verify_wrong_key_raises(self, patch_signing):
         import jwt as pyjwt
-        from cryptography.hazmat.primitives.asymmetric.ec import (
-            SECP256R1,
-            generate_private_key,
-        )
+        from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
 
-        wrong_key = generate_private_key(SECP256R1())
-        # Sign with wrong key, but verification uses the patched public_key
-        bad_token = pyjwt.encode({"iss": "x"}, wrong_key, algorithm="ES256")
+        wrong_key = generate_private_key(public_exponent=65537, key_size=2048)
+        bad_token = pyjwt.encode({"iss": "x"}, wrong_key, algorithm="RS256")
         with pytest.raises(ValueError, match="Invalid workflow identity token"):
             verify_workflow_identity_token(bad_token)
 
     def test_verify_expired_token_raises(self, patch_signing):
-        _, public_key = patch_signing
         import jwt as pyjwt
 
         private_key, _ = patch_signing
@@ -196,7 +191,7 @@ class TestVerifyWorkflowIdentityToken:
                 "wf_run_id": WF_RUN_ID,
             },
             private_key,
-            algorithm="ES256",
+            algorithm="RS256",
         )
         with pytest.raises(ValueError, match="Invalid workflow identity token"):
             verify_workflow_identity_token(bad_token)
@@ -219,7 +214,7 @@ class TestVerifyWorkflowIdentityToken:
                 # wf_run_id intentionally omitted
             },
             private_key,
-            algorithm="ES256",
+            algorithm="RS256",
         )
         with pytest.raises(ValueError, match="Invalid workflow identity token"):
             verify_workflow_identity_token(bad_token)

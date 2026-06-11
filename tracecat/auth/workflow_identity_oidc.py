@@ -17,7 +17,7 @@ from tracecat.auth.workflow_identities import (
     WORKFLOW_IDENTITY_ISSUER_PATH,
     get_issuer_url,
 )
-from tracecat.mcp.oidc.signing import get_public_jwk
+from tracecat.auth.workflow_identity_signing import get_public_jwk
 
 router = APIRouter(
     prefix=WORKFLOW_IDENTITY_ISSUER_PATH, tags=["Workflow Identity OIDC"]
@@ -36,7 +36,7 @@ async def openid_configuration() -> dict[str, Any]:
     return {
         "issuer": issuer,
         "jwks_uri": f"{issuer}/.well-known/jwks.json",
-        "id_token_signing_alg_values_supported": ["ES256"],
+        "id_token_signing_alg_values_supported": ["RS256"],
         "subject_types_supported": ["public"],
         "response_types_supported": ["token"],
         "claims_supported": [
@@ -56,5 +56,5 @@ async def openid_configuration() -> dict[str, Any]:
 
 @router.get("/.well-known/jwks.json")
 async def jwks() -> dict[str, list[dict[str, str]]]:
-    """JSON Web Key Set containing the ES256 public key for workflow identity tokens."""
+    """JSON Web Key Set containing the RS256 public key for workflow identity tokens."""
     return {"keys": [get_public_jwk()]}

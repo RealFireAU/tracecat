@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from jwt import InvalidTokenError, PyJWTError
+from jwt import PyJWTError
 from pydantic import BaseModel, Field, ValidationError
 
 from tracecat import config
@@ -115,8 +115,8 @@ def mint_workflow_identity_token(
     Returns:
         A compact JWS string (ES256) suitable for token exchange with external IDPs.
     """
-    # Import here to avoid circular imports — mcp.oidc.signing depends on auth.secrets
-    from tracecat.mcp.oidc.signing import mint_jwt
+    # Import here to avoid circular imports at module load time
+    from tracecat.auth.workflow_identity_signing import mint_jwt
 
     now = datetime.now(UTC)
     ttl = (
@@ -165,21 +165,18 @@ def verify_workflow_identity_token(token: str) -> WorkflowIdentityPayload:
     Raises:
         ValueError: If token is invalid, expired, or missing required claims
     """
-    import jwt as pyjwt
-
-    from tracecat.mcp.oidc.signing import get_signing_key
+    from tracecat.auth.workflow_identity_signing import verify_jwt
 
     try:
-        public_key = get_signing_key().public_key()
-        payload = pyjwt.decode(
-            token,
-            public_key,
-            algorithms=["ES256"],
-            options={"require": list(REQUIRED_CLAIMS), "verify_aud": False},
-        )
-    except (PyJWTError, InvalidTokenError) as exc:
+        payload = verify_jwt(token)
+    except PyJWTError as exc:
         logger.warning("Failed to verify workflow identity token", error=str(exc))
         raise ValueError("Invalid workflow identity token") from exc
+
+    missing = [c for c in REQUIRED_CLAIMS if c not in payload]
+    if missing:
+        logger.warning("Workflow identity token missing claims", missing=missing)
+        raise ValueError("Invalid workflow identity token")
 
     try:
         issued_at = datetime.fromtimestamp(payload["iat"], tz=UTC)
