@@ -384,6 +384,36 @@ class ActionStatement(BaseModel):
         return self
 
 
+class WorkflowIdentityConfig(BaseModel):
+    """Configuration for issuing a workflow identity token for external IDP trust.
+
+    When enabled, Tracecat mints a JWT that external identity providers
+    (Azure Entra, AWS STS, GCP, etc.) can validate and exchange for access tokens.
+
+    The token is available to actions via ENV.workflow.identity_token.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to mint and inject a workflow identity token for this execution",
+    )
+    audiences: list[str] = Field(
+        default_factory=list,
+        description=(
+            "External IDPs that will accept this token (e.g., "
+            "['https://login.microsoftonline.com', 'https://sts.amazonaws.com']). "
+            "Empty list means token can be validated by any IDP with the public key."
+        ),
+    )
+    ttl_seconds: int | None = Field(
+        default=None,
+        description=(
+            "Token lifetime in seconds. If None, uses system default "
+            "(TRACECAT__WORKFLOW_IDENTITY_TOKEN_TTL_SECONDS, typically 900s)."
+        ),
+    )
+
+
 class DSLConfig(BaseModel):
     """This is the runtime configuration for the workflow.
 
@@ -408,6 +438,10 @@ class DSLConfig(BaseModel):
         description="Workflow timeout in seconds. If set to 0, the workflow has no timeout.",
     )
     """Workflow timeout in seconds. If set to 0, the workflow has no timeout."""
+    identity: WorkflowIdentityConfig = Field(
+        default_factory=WorkflowIdentityConfig,
+        description="Workflow identity token configuration for external IDP trust",
+    )
 
 
 class Trigger(BaseModel):
@@ -441,6 +475,14 @@ class RunContext(BaseModel):
     environment: str
     logical_time: datetime
     """The logical start time for the workflow run."""
+
+    workflow_identity_token: str | None = Field(
+        default=None,
+        description=(
+            "JWT token for external IDP trust, if workflow has identity config enabled. "
+            "This token is available to actions via ENV.workflow.identity_token."
+        ),
+    )
 
     @field_validator("wf_id", mode="before")
     @classmethod
