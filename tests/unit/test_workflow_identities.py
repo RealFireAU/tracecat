@@ -75,6 +75,8 @@ def _mint(**kwargs) -> str:
         "wf_id": WF_ID,
         "wf_exec_id": WF_EXEC_ID,
         "wf_run_id": WF_RUN_ID,
+        "trigger_type": "webhook",
+        "execution_type": "published",
     }
     defaults.update(kwargs)
     return mint_workflow_identity_token(**defaults)
@@ -142,12 +144,19 @@ class TestMintWorkflowIdentityToken:
         payload = _decode(_mint(), public_key)
         assert payload["iss"] == "https://api.example.com/oauth/workflow"
 
-    def test_subject_contains_wf_info(self, patch_signing):
+    def test_subject_urn_format(self, patch_signing):
         _, public_key = patch_signing
-        payload = _decode(_mint(), public_key)
-        assert str(ORGANIZATION_ID) in payload["sub"]
-        assert str(WF_ID) in payload["sub"]
-        assert WF_EXEC_ID in payload["sub"]
+        payload = _decode(
+            _mint(trigger_type="webhook", execution_type="published"), public_key
+        )
+        expected = (
+            f"urn:org:{ORGANIZATION_ID}"
+            f":ws:{WORKSPACE_ID}"
+            f":wf:{WF_ID}"
+            f":webhook:published"
+            f":exec:{WF_EXEC_ID}"
+        )
+        assert payload["sub"] == expected
 
 
 class TestVerifyWorkflowIdentityToken:

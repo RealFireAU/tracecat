@@ -628,6 +628,8 @@ class DSLWorkflow:
                 wf_id=args.wf_id,
                 wf_exec_id=wf_info.workflow_id,
                 wf_run_id=wf_info.run_id,
+                trigger_type=get_trigger_type(wf_info),
+                execution_type=self.execution_type.value,
                 audiences=identity_cfg.audiences or [],
                 workflow_timeout_seconds=execution_timeout_seconds,
             )

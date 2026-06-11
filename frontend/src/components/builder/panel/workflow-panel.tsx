@@ -808,7 +808,7 @@ function WorkflowSettingsPanel({
                               </span>
                             </div>
                             <span className="text-muted-foreground">
-                              When enabled, Tracecat mints a short-lived ES256
+                              When enabled, Tracecat mints a short-lived RS256
                               JWT at workflow start. Actions can exchange it
                               with external identity providers (Azure, AWS, GCP)
                               for access tokens without storing long-lived
@@ -860,14 +860,11 @@ function WorkflowSettingsPanel({
                               </span>
                             </div>
                             <span className="text-muted-foreground">
-                              The external identity providers that will accept
-                              this token. Each entry becomes an <code>aud</code>{" "}
-                              claim in the JWT (e.g.{" "}
-                              <code>
-                                https://login.microsoftonline.com/
-                                {"<tenant-id>"}
-                              </code>
-                              ).
+                              The audiences included in the{" "}
+                              <code>aud</code> claim for external IDP token
+                              exchange. Azure Entra:{" "}
+                              <code>api://AzureADTokenExchange</code>. AWS STS:{" "}
+                              <code>sts.amazonaws.com</code>.
                             </span>
                           </div>
                         </HoverCardContent>

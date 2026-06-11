@@ -400,9 +400,10 @@ class WorkflowIdentityConfig(BaseModel):
     audiences: list[str] = Field(
         default_factory=list,
         description=(
-            "External IDPs that will accept this token (e.g., "
-            "['https://login.microsoftonline.com', 'https://sts.amazonaws.com']). "
-            "Empty list means token can be validated by any IDP with the public key."
+            "Audiences included in the aud claim for external IDP token exchange. "
+            "Azure Entra: 'api://AzureADTokenExchange'. "
+            "AWS STS: 'sts.amazonaws.com'. "
+            "GCP: use the workload identity pool provider resource name."
         ),
     )
 
