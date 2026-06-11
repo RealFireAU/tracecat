@@ -4,8 +4,9 @@ Allows Tracecat workflow executions to be trusted by external identity providers
 (Azure Entra, AWS STS, GCP, etc.) for token exchange via RFC 8693 token exchange.
 
 A workflow execution can mint a signed JWT that external IDPs validate using
-Tracecat's public keys. This enables actions to exchange the workflow token for
-provider-specific access tokens without storing long-lived credentials.
+Tracecat's public keys exposed at the OIDC discovery endpoint:
+
+    {PUBLIC_API_URL}/oauth/workflow/.well-known/openid-configuration
 
 Example flow:
 1. Workflow starts, mints identity token if config.identity.enabled=true
@@ -18,21 +19,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlparse
 
-import jwt
-from jwt import PyJWTError
+from jwt import InvalidTokenError, PyJWTError
 from pydantic import BaseModel, Field, ValidationError
 
 from tracecat import config
-from tracecat.auth.secrets import get_service_key
 from tracecat.identifiers import OrganizationID, WorkspaceID
 from tracecat.identifiers.workflow import WorkflowUUID
 from tracecat.logger import logger
 
-WORKFLOW_IDENTITY_TOKEN_ISSUER = "tracecat-workflow"
-WORKFLOW_IDENTITY_TOKEN_SUBJECT_PREFIX = "tracecat-workflow-execution"
 WORKFLOW_IDENTITY_DEFAULT_TTL_SECONDS = 600  # 10 minutes
+WORKFLOW_IDENTITY_ISSUER_PATH = "/oauth/workflow"
 REQUIRED_CLAIMS = (
     "iss",
     "sub",
@@ -45,6 +42,17 @@ REQUIRED_CLAIMS = (
     "wf_exec_id",
     "wf_run_id",
 )
+
+
+def get_issuer_url() -> str:
+    """Return the public issuer URL for workflow identity tokens.
+
+    Must match the router prefix so that external IDPs can reach the
+    OIDC discovery document at ``{issuer}/.well-known/openid-configuration``.
+    """
+    return (
+        f"{config.TRACECAT__PUBLIC_API_URL.rstrip('/')}{WORKFLOW_IDENTITY_ISSUER_PATH}"
+    )
 
 
 class WorkflowIdentityPayload(BaseModel):
@@ -61,25 +69,16 @@ class WorkflowIdentityPayload(BaseModel):
 
     @property
     def subject(self) -> str:
-        """RFC 8693 compliant subject for OIDC federation.
-
-        Format: {app_url}/workflows/{org_id}/{wf_id}/{wf_exec_id}
-        """
-        base = _app_base_url()
-        return f"{base}/workflows/{self.organization_id}/{self.wf_id}/{self.wf_exec_id}"
+        """RFC 8693 compliant subject identifying this workflow execution."""
+        issuer = get_issuer_url().rstrip("/")
+        return (
+            f"{issuer}/workflows/{self.organization_id}/{self.wf_id}/{self.wf_exec_id}"
+        )
 
     @property
     def issuer(self) -> str:
         """OIDC issuer URL."""
-        return _app_base_url() + "/"
-
-
-def _app_base_url() -> str:
-    """Derive a clean base URL from TRACECAT__PUBLIC_APP_URL, stripping trailing slashes."""
-    url = config.TRACECAT__PUBLIC_APP_URL.rstrip("/")
-    parsed = urlparse(url)
-    # Return scheme + netloc only (no path) as the canonical base
-    return f"{parsed.scheme}://{parsed.netloc}"
+        return get_issuer_url()
 
 
 def mint_workflow_identity_token(
@@ -92,11 +91,11 @@ def mint_workflow_identity_token(
     audiences: list[str] | None = None,
     workflow_timeout_seconds: float | None = None,
 ) -> str:
-    """Mint a JWT for workflow execution identity.
+    """Mint an ES256-signed JWT for workflow execution identity.
 
     Creates a cryptographically signed token that external IDPs can validate
-    to trust this workflow execution. The token can be exchanged for provider-
-    specific access tokens using RFC 8693 token exchange.
+    using the public key served at the JWKS endpoint. The token can be
+    exchanged for provider-specific access tokens using RFC 8693 token exchange.
 
     Token lifetime is gated to the workflow's own execution timeout so the
     identity token cannot outlive the workflow that issued it.  If no timeout
@@ -109,13 +108,16 @@ def mint_workflow_identity_token(
         wf_exec_id: Temporal workflow execution ID (unique per execution)
         wf_run_id: Temporal run ID
         audiences: List of external IDP audiences (e.g., Azure tenant, AWS account).
-                   If None, empty list is used (audiences can be validated on exchange).
+                   If None, empty list is used.
         workflow_timeout_seconds: The workflow execution timeout in seconds.
                                   If 0 or None, falls back to the default TTL (10 min).
 
     Returns:
-        A signed JWT (compact JWS format) suitable for token exchange with external IDPs.
+        A compact JWS string (ES256) suitable for token exchange with external IDPs.
     """
+    # Import here to avoid circular imports — mcp.oidc.signing depends on auth.secrets
+    from tracecat.mcp.oidc.signing import mint_jwt
+
     now = datetime.now(UTC)
     ttl = (
         int(workflow_timeout_seconds)
@@ -124,9 +126,8 @@ def mint_workflow_identity_token(
     )
     audiences = audiences or []
 
-    base_url = _app_base_url()
-    issuer = f"{base_url}/"
-    subject = f"{base_url}/workflows/{organization_id}/{wf_id}/{wf_exec_id}"
+    issuer = get_issuer_url()
+    subject = f"{issuer.rstrip('/')}/workflows/{organization_id}/{wf_id}/{wf_exec_id}"
 
     payload: dict[str, Any] = {
         "iss": issuer,
@@ -134,7 +135,6 @@ def mint_workflow_identity_token(
         "aud": audiences,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=ttl)).timestamp()),
-        # Custom claims for access control and audit
         "workspace_id": str(workspace_id),
         "organization_id": str(organization_id),
         "wf_id": str(wf_id),
@@ -150,15 +150,11 @@ def mint_workflow_identity_token(
         ttl_seconds=ttl,
     )
 
-    return jwt.encode(payload, get_service_key(), algorithm="HS256")
+    return mint_jwt(payload)
 
 
 def verify_workflow_identity_token(token: str) -> WorkflowIdentityPayload:
     """Verify and decode a workflow identity token.
-
-    Validates the token signature and required claims. Used by:
-    - Tracecat internally for audit/revocation
-    - External IDPs for token exchange validation
 
     Args:
         token: The compact JWS token string
@@ -169,15 +165,19 @@ def verify_workflow_identity_token(token: str) -> WorkflowIdentityPayload:
     Raises:
         ValueError: If token is invalid, expired, or missing required claims
     """
+    import jwt as pyjwt
+
+    from tracecat.mcp.oidc.signing import get_signing_key
+
     try:
-        payload = jwt.decode(
+        public_key = get_signing_key().public_key()
+        payload = pyjwt.decode(
             token,
-            get_service_key(),
-            algorithms=["HS256"],
-            options={"require": list(REQUIRED_CLAIMS)},
-            # Don't validate audience here - external IDPs handle that
+            public_key,
+            algorithms=["ES256"],
+            options={"require": list(REQUIRED_CLAIMS), "verify_aud": False},
         )
-    except PyJWTError as exc:
+    except (PyJWTError, InvalidTokenError) as exc:
         logger.warning("Failed to verify workflow identity token", error=str(exc))
         raise ValueError("Invalid workflow identity token") from exc
 

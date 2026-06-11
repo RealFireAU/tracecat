@@ -405,13 +405,6 @@ class WorkflowIdentityConfig(BaseModel):
             "Empty list means token can be validated by any IDP with the public key."
         ),
     )
-    ttl_seconds: int | None = Field(
-        default=None,
-        description=(
-            "Token lifetime in seconds. If None, uses system default "
-            "(TRACECAT__WORKFLOW_IDENTITY_TOKEN_TTL_SECONDS, typically 900s)."
-        ),
-    )
 
 
 class DSLConfig(BaseModel):
