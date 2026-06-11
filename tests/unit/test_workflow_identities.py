@@ -11,6 +11,7 @@ import pytest
 
 from tracecat.auth.workflow_identities import (
     REQUIRED_CLAIMS,
+    WORKFLOW_IDENTITY_DEFAULT_TTL_SECONDS,
     WorkflowIdentityPayload,
     mint_workflow_identity_token,
     verify_workflow_identity_token,
@@ -34,10 +35,9 @@ def patch_service_key():
 
 
 @pytest.fixture(autouse=True)
-def patch_hostname():
+def patch_app_url():
     with patch("tracecat.auth.workflow_identities.config") as mock_config:
-        mock_config.TRACECAT__HOSTNAME = "tracecat.example.com"
-        mock_config.TRACECAT__WORKFLOW_IDENTITY_TOKEN_TTL_SECONDS = 900
+        mock_config.TRACECAT__PUBLIC_APP_URL = "https://tracecat.example.com"
         yield mock_config
 
 
@@ -82,20 +82,26 @@ class TestMintWorkflowIdentityToken:
         )
         assert payload["aud"] == []
 
-    def test_custom_ttl(self):
-        token = _mint(ttl_seconds=60)
-        payload = jwt.decode(
-            token, FAKE_SERVICE_KEY, algorithms=["HS256"], options={"verify_aud": False}
-        )
-        assert payload["exp"] - payload["iat"] == 60
-
-    def test_default_ttl_used_when_none(self, patch_hostname):
-        patch_hostname.TRACECAT__WORKFLOW_IDENTITY_TOKEN_TTL_SECONDS = 300
-        token = _mint(ttl_seconds=None)
+    def test_ttl_from_workflow_timeout(self):
+        token = _mint(workflow_timeout_seconds=300)
         payload = jwt.decode(
             token, FAKE_SERVICE_KEY, algorithms=["HS256"], options={"verify_aud": False}
         )
         assert payload["exp"] - payload["iat"] == 300
+
+    def test_default_ttl_when_timeout_is_none(self):
+        token = _mint(workflow_timeout_seconds=None)
+        payload = jwt.decode(
+            token, FAKE_SERVICE_KEY, algorithms=["HS256"], options={"verify_aud": False}
+        )
+        assert payload["exp"] - payload["iat"] == WORKFLOW_IDENTITY_DEFAULT_TTL_SECONDS
+
+    def test_default_ttl_when_timeout_is_zero(self):
+        token = _mint(workflow_timeout_seconds=0)
+        payload = jwt.decode(
+            token, FAKE_SERVICE_KEY, algorithms=["HS256"], options={"verify_aud": False}
+        )
+        assert payload["exp"] - payload["iat"] == WORKFLOW_IDENTITY_DEFAULT_TTL_SECONDS
 
     def test_custom_claims_present(self):
         token = _mint()
@@ -108,16 +114,15 @@ class TestMintWorkflowIdentityToken:
         assert payload["wf_exec_id"] == WF_EXEC_ID
         assert payload["wf_run_id"] == WF_RUN_ID
 
-    def test_issuer_uses_hostname(self, patch_hostname):
-        patch_hostname.TRACECAT__HOSTNAME = "myhost.example.com"
+    def test_issuer_derived_from_public_app_url(self, patch_app_url):
+        patch_app_url.TRACECAT__PUBLIC_APP_URL = "https://myhost.example.com"
         token = _mint()
         payload = jwt.decode(
             token, FAKE_SERVICE_KEY, algorithms=["HS256"], options={"verify_aud": False}
         )
         assert payload["iss"] == "https://myhost.example.com/"
 
-    def test_subject_contains_wf_info(self, patch_hostname):
-        patch_hostname.TRACECAT__HOSTNAME = "myhost.example.com"
+    def test_subject_contains_wf_info(self):
         token = _mint()
         payload = jwt.decode(
             token, FAKE_SERVICE_KEY, algorithms=["HS256"], options={"verify_aud": False}
@@ -125,6 +130,16 @@ class TestMintWorkflowIdentityToken:
         assert str(ORGANIZATION_ID) in payload["sub"]
         assert str(WF_ID) in payload["sub"]
         assert WF_EXEC_ID in payload["sub"]
+
+    def test_public_app_url_path_stripped_from_base(self, patch_app_url):
+        # Paths in PUBLIC_APP_URL should not appear in issuer/subject
+        patch_app_url.TRACECAT__PUBLIC_APP_URL = "https://myhost.example.com/some/path"
+        token = _mint()
+        payload = jwt.decode(
+            token, FAKE_SERVICE_KEY, algorithms=["HS256"], options={"verify_aud": False}
+        )
+        assert payload["iss"] == "https://myhost.example.com/"
+        assert "/some/path" not in payload["iss"]
 
 
 class TestVerifyWorkflowIdentityToken:
@@ -150,9 +165,18 @@ class TestVerifyWorkflowIdentityToken:
 
     def test_verify_wrong_key_raises(self):
         token = jwt.encode(
-            {"iss": "x", "sub": "x", "aud": [], "iat": 1, "exp": 9999999999,
-             "workspace_id": str(WORKSPACE_ID), "organization_id": str(ORGANIZATION_ID),
-             "wf_id": str(WF_ID), "wf_exec_id": WF_EXEC_ID, "wf_run_id": WF_RUN_ID},
+            {
+                "iss": "x",
+                "sub": "x",
+                "aud": [],
+                "iat": 1,
+                "exp": 9999999999,
+                "workspace_id": str(WORKSPACE_ID),
+                "organization_id": str(ORGANIZATION_ID),
+                "wf_id": str(WF_ID),
+                "wf_exec_id": WF_EXEC_ID,
+                "wf_run_id": WF_RUN_ID,
+            },
             "wrong-key",
             algorithm="HS256",
         )
@@ -161,9 +185,18 @@ class TestVerifyWorkflowIdentityToken:
 
     def test_verify_expired_token_raises(self):
         token = jwt.encode(
-            {"iss": "x", "sub": "x", "aud": [], "iat": 1, "exp": 1,
-             "workspace_id": str(WORKSPACE_ID), "organization_id": str(ORGANIZATION_ID),
-             "wf_id": str(WF_ID), "wf_exec_id": WF_EXEC_ID, "wf_run_id": WF_RUN_ID},
+            {
+                "iss": "x",
+                "sub": "x",
+                "aud": [],
+                "iat": 1,
+                "exp": 1,
+                "workspace_id": str(WORKSPACE_ID),
+                "organization_id": str(ORGANIZATION_ID),
+                "wf_id": str(WF_ID),
+                "wf_exec_id": WF_EXEC_ID,
+                "wf_run_id": WF_RUN_ID,
+            },
             FAKE_SERVICE_KEY,
             algorithm="HS256",
         )
@@ -171,11 +204,19 @@ class TestVerifyWorkflowIdentityToken:
             verify_workflow_identity_token(token)
 
     def test_verify_missing_claim_raises(self):
-        # Missing wf_run_id
         token = jwt.encode(
-            {"iss": "x", "sub": "x", "aud": [], "iat": 1, "exp": 9999999999,
-             "workspace_id": str(WORKSPACE_ID), "organization_id": str(ORGANIZATION_ID),
-             "wf_id": str(WF_ID), "wf_exec_id": WF_EXEC_ID},
+            {
+                "iss": "x",
+                "sub": "x",
+                "aud": [],
+                "iat": 1,
+                "exp": 9999999999,
+                "workspace_id": str(WORKSPACE_ID),
+                "organization_id": str(ORGANIZATION_ID),
+                "wf_id": str(WF_ID),
+                "wf_exec_id": WF_EXEC_ID,
+                # wf_run_id intentionally omitted
+            },
             FAKE_SERVICE_KEY,
             algorithm="HS256",
         )
@@ -198,8 +239,8 @@ class TestVerifyWorkflowIdentityToken:
 
 
 class TestWorkflowIdentityPayload:
-    def test_subject_property(self):
-        payload = WorkflowIdentityPayload(
+    def _make_payload(self) -> WorkflowIdentityPayload:
+        return WorkflowIdentityPayload(
             workspace_id=WORKSPACE_ID,
             organization_id=ORGANIZATION_ID,
             wf_id=WF_ID,
@@ -207,39 +248,18 @@ class TestWorkflowIdentityPayload:
             wf_run_id=WF_RUN_ID,
             audiences=[],
         )
-        with patch("tracecat.auth.workflow_identities.config") as mock_cfg:
-            mock_cfg.TRACECAT__HOSTNAME = "host.example.com"
-            subject = payload.subject
+
+    def test_subject_property(self, patch_app_url):
+        patch_app_url.TRACECAT__PUBLIC_APP_URL = "https://host.example.com"
+        subject = self._make_payload().subject
         assert subject.startswith("https://host.example.com/workflows/")
         assert str(ORGANIZATION_ID) in subject
         assert str(WF_ID) in subject
 
-    def test_issuer_property(self):
-        payload = WorkflowIdentityPayload(
-            workspace_id=WORKSPACE_ID,
-            organization_id=ORGANIZATION_ID,
-            wf_id=WF_ID,
-            wf_exec_id=WF_EXEC_ID,
-            wf_run_id=WF_RUN_ID,
-            audiences=[],
-        )
-        with patch("tracecat.auth.workflow_identities.config") as mock_cfg:
-            mock_cfg.TRACECAT__HOSTNAME = "host.example.com"
-            issuer = payload.issuer
-        assert issuer == "https://host.example.com/"
+    def test_issuer_property(self, patch_app_url):
+        patch_app_url.TRACECAT__PUBLIC_APP_URL = "https://host.example.com"
+        assert self._make_payload().issuer == "https://host.example.com/"
 
-    def test_fallback_hostname_when_empty(self):
-        payload = WorkflowIdentityPayload(
-            workspace_id=WORKSPACE_ID,
-            organization_id=ORGANIZATION_ID,
-            wf_id=WF_ID,
-            wf_exec_id=WF_EXEC_ID,
-            wf_run_id=WF_RUN_ID,
-            audiences=[],
-        )
-        with patch("tracecat.auth.workflow_identities.config") as mock_cfg:
-            mock_cfg.TRACECAT__HOSTNAME = ""
-            subject = payload.subject
-            issuer = payload.issuer
-        assert "tracecat.local" in subject
-        assert "tracecat.local" in issuer
+    def test_trailing_slash_stripped(self, patch_app_url):
+        patch_app_url.TRACECAT__PUBLIC_APP_URL = "https://host.example.com/"
+        assert self._make_payload().issuer == "https://host.example.com/"

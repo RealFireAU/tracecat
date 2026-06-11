@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 import jwt
 from jwt import PyJWTError
@@ -31,6 +32,7 @@ from tracecat.logger import logger
 
 WORKFLOW_IDENTITY_TOKEN_ISSUER = "tracecat-workflow"
 WORKFLOW_IDENTITY_TOKEN_SUBJECT_PREFIX = "tracecat-workflow-execution"
+WORKFLOW_IDENTITY_DEFAULT_TTL_SECONDS = 600  # 10 minutes
 REQUIRED_CLAIMS = (
     "iss",
     "sub",
@@ -61,16 +63,23 @@ class WorkflowIdentityPayload(BaseModel):
     def subject(self) -> str:
         """RFC 8693 compliant subject for OIDC federation.
 
-        Format: https://{hostname}/workflows/{org_id}/{wf_id}/{wf_exec_id}
+        Format: {app_url}/workflows/{org_id}/{wf_id}/{wf_exec_id}
         """
-        hostname = config.TRACECAT__HOSTNAME or "tracecat.local"
-        return f"https://{hostname}/workflows/{self.organization_id}/{self.wf_id}/{self.wf_exec_id}"
+        base = _app_base_url()
+        return f"{base}/workflows/{self.organization_id}/{self.wf_id}/{self.wf_exec_id}"
 
     @property
     def issuer(self) -> str:
         """OIDC issuer URL."""
-        hostname = config.TRACECAT__HOSTNAME or "tracecat.local"
-        return f"https://{hostname}/"
+        return _app_base_url() + "/"
+
+
+def _app_base_url() -> str:
+    """Derive a clean base URL from TRACECAT__PUBLIC_APP_URL, stripping trailing slashes."""
+    url = config.TRACECAT__PUBLIC_APP_URL.rstrip("/")
+    parsed = urlparse(url)
+    # Return scheme + netloc only (no path) as the canonical base
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def mint_workflow_identity_token(
@@ -81,13 +90,17 @@ def mint_workflow_identity_token(
     wf_exec_id: str,
     wf_run_id: str,
     audiences: list[str] | None = None,
-    ttl_seconds: int | None = None,
+    workflow_timeout_seconds: float | None = None,
 ) -> str:
     """Mint a JWT for workflow execution identity.
 
     Creates a cryptographically signed token that external IDPs can validate
     to trust this workflow execution. The token can be exchanged for provider-
     specific access tokens using RFC 8693 token exchange.
+
+    Token lifetime is gated to the workflow's own execution timeout so the
+    identity token cannot outlive the workflow that issued it.  If no timeout
+    is configured the default is 10 minutes.
 
     Args:
         workspace_id: Workspace where workflow is running
@@ -97,18 +110,23 @@ def mint_workflow_identity_token(
         wf_run_id: Temporal run ID
         audiences: List of external IDP audiences (e.g., Azure tenant, AWS account).
                    If None, empty list is used (audiences can be validated on exchange).
-        ttl_seconds: Token lifetime in seconds. If None, uses config default.
+        workflow_timeout_seconds: The workflow execution timeout in seconds.
+                                  If 0 or None, falls back to the default TTL (10 min).
 
     Returns:
         A signed JWT (compact JWS format) suitable for token exchange with external IDPs.
     """
     now = datetime.now(UTC)
-    ttl = ttl_seconds or config.TRACECAT__WORKFLOW_IDENTITY_TOKEN_TTL_SECONDS
+    ttl = (
+        int(workflow_timeout_seconds)
+        if workflow_timeout_seconds and workflow_timeout_seconds > 0
+        else WORKFLOW_IDENTITY_DEFAULT_TTL_SECONDS
+    )
     audiences = audiences or []
 
-    hostname = config.TRACECAT__HOSTNAME or "tracecat.local"
-    issuer = f"https://{hostname}/"
-    subject = f"https://{hostname}/workflows/{organization_id}/{wf_id}/{wf_exec_id}"
+    base_url = _app_base_url()
+    issuer = f"{base_url}/"
+    subject = f"{base_url}/workflows/{organization_id}/{wf_id}/{wf_exec_id}"
 
     payload: dict[str, Any] = {
         "iss": issuer,
@@ -178,9 +196,7 @@ def verify_workflow_identity_token(token: str) -> WorkflowIdentityPayload:
             expires_at=expires_at,
         )
     except (KeyError, ValidationError, ValueError) as exc:
-        logger.warning(
-            "Workflow identity token payload is invalid", error=str(exc)
-        )
+        logger.warning("Workflow identity token payload is invalid", error=str(exc))
         raise ValueError("Workflow identity token payload is invalid") from exc
 
     return token_payload

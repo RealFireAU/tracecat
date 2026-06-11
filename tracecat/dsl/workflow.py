@@ -609,6 +609,19 @@ class DSLWorkflow:
         identity_cfg = self.runtime_config.identity
         workflow_identity_token: str | None = None
         if identity_cfg.enabled:
+            # Gate token lifetime to the workflow's own execution timeout so the
+            # identity token cannot outlive the workflow that issued it.
+            # DSLConfig.timeout=0 means unlimited; wf_info.execution_timeout is
+            # already resolved against workspace settings by the executor.
+            execution_timeout_seconds: float | None = (
+                wf_info.execution_timeout.total_seconds()
+                if wf_info.execution_timeout is not None
+                else (
+                    self.runtime_config.timeout
+                    if self.runtime_config.timeout > 0
+                    else None
+                )
+            )
             workflow_identity_token = mint_workflow_identity_token(
                 workspace_id=self.workspace_id,
                 organization_id=self.organization_id,
@@ -616,7 +629,7 @@ class DSLWorkflow:
                 wf_exec_id=wf_info.workflow_id,
                 wf_run_id=wf_info.run_id,
                 audiences=identity_cfg.audiences or [],
-                ttl_seconds=identity_cfg.ttl_seconds,
+                workflow_timeout_seconds=execution_timeout_seconds,
             )
 
         # Prepare user facing context
