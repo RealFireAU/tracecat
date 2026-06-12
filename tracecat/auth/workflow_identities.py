@@ -8,8 +8,15 @@ Tracecat's public keys exposed at the OIDC discovery endpoint:
 
     {PUBLIC_API_URL}/oauth/workflow/.well-known/openid-configuration
 
+Token minting happens on the executor (outside the Temporal workflow sandbox)
+so that cryptographic operations are never subject to Temporal's determinism
+restrictions. The token is injected into ``ENV.workflow.identity_token`` before
+action argument templates are evaluated, and is automatically added to the
+secrets masking set so it is redacted from action outputs and Temporal event
+history using the same substitution mechanism as secret values.
+
 Example flow:
-1. Workflow starts, mints identity token if config.identity.enabled=true
+1. Executor mints identity token at the start of each action if identity.enabled=true
 2. Action receives token via ENV.workflow.identity_token
 3. Action exchanges token with Azure/AWS/GCP for access token (RFC 8693)
 4. Action uses access token with provider APIs (Graph, IAM, etc.)
@@ -21,6 +28,7 @@ GCP example audience: ``//iam.googleapis.com/projects/{project}/locations/global
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -28,6 +36,7 @@ from jwt import PyJWTError
 from pydantic import BaseModel, Field, ValidationError
 
 from tracecat import config
+from tracecat.auth.workflow_identity_signing import mint_jwt, verify_jwt
 from tracecat.identifiers import OrganizationID, WorkspaceID
 from tracecat.identifiers.workflow import WorkflowUUID
 from tracecat.logger import logger
@@ -40,12 +49,49 @@ REQUIRED_CLAIMS = (
     "aud",
     "iat",
     "exp",
-    "workspace_id",
-    "organization_id",
-    "wf_id",
-    "wf_exec_id",
-    "wf_run_id",
+    "tracecat",
 )
+
+# Well-known audience identifiers that trigger provider-specific claim injection.
+_AWS_STS_AUDIENCE = "sts.amazonaws.com"
+
+
+def _provider_claims(
+    audiences: list[str],
+    *,
+    workspace_id: WorkspaceID,
+    organization_id: OrganizationID,
+    wf_id: WorkflowUUID,
+    wf_exec_id: str,
+) -> dict[str, Any]:
+    """Return extra top-level claims required by specific identity providers.
+
+    Each provider that requires non-standard claim namespaces gets its own
+    branch here. Callers get back a dict that is merged into the JWT payload.
+
+    AWS STS: AssumeRoleWithWebIdentity reads session tags from the
+    ``https://aws.amazon.com/tags`` claim namespace, allowing IAM conditions
+    to match on workflow-level attributes.
+    """
+    claims: dict[str, Any] = {}
+
+    if _AWS_STS_AUDIENCE in audiences:
+        claims["https://aws.amazon.com/tags"] = {
+            "principal_tags": {
+                "WorkspaceId": [str(workspace_id)],
+                "OrganizationId": [str(organization_id)],
+                "WorkflowId": [str(wf_id)],
+                "ExecutionId": [wf_exec_id],
+            },
+            "transitive_tag_keys": [
+                "WorkspaceId",
+                "OrganizationId",
+                "WorkflowId",
+                "ExecutionId",
+            ],
+        }
+
+    return claims
 
 
 def get_issuer_url() -> str:
@@ -89,7 +135,7 @@ def mint_workflow_identity_token(
     audiences: list[str] | None = None,
     workflow_timeout_seconds: float | None = None,
 ) -> str:
-    """Mint an RS256-signed JWT for workflow execution identity.
+    """Mint an ES256-signed JWT for workflow execution identity.
 
     Creates a cryptographically signed token that external IDPs can validate
     using the public key served at the JWKS endpoint. The token can be
@@ -118,11 +164,8 @@ def mint_workflow_identity_token(
                                   If 0 or None, defaults to 10 minutes.
 
     Returns:
-        A compact JWS string (RS256) suitable for RFC 8693 token exchange.
+        A compact JWS string (ES256) suitable for RFC 8693 token exchange.
     """
-    # Import here to avoid circular imports at module load time
-    from tracecat.auth.workflow_identity_signing import mint_jwt
-
     now = datetime.now(UTC)
     ttl = (
         int(workflow_timeout_seconds)
@@ -132,26 +175,38 @@ def mint_workflow_identity_token(
     audiences = audiences or []
 
     issuer = get_issuer_url()
-    subject = (
-        f"urn:org:{organization_id}"
-        f":ws:{workspace_id}"
-        f":wf:{wf_id}"
-        f":{trigger_type}"
-        f":{execution_type}"
-        f":exec:{wf_exec_id}"
-    )
+    # Subject is stable per workflow so it can be used as a fixed subject in
+    # external IDP federated credentials (e.g. Entra). Execution-specific
+    # context lives in the wf_exec_id / wf_run_id claims.
+    subject = f"urn:org:{organization_id}:ws:{workspace_id}:wf:{wf_id}"
 
     payload: dict[str, Any] = {
         "iss": issuer,
         "sub": subject,
-        "aud": audiences,
+        # Single-audience tokens use a string; multi-audience use an array.
+        "aud": audiences[0] if len(audiences) == 1 else audiences,
+        "jti": str(uuid.uuid4()),
         "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=ttl)).timestamp()),
-        "workspace_id": str(workspace_id),
-        "organization_id": str(organization_id),
-        "wf_id": str(wf_id),
-        "wf_exec_id": wf_exec_id,
-        "wf_run_id": wf_run_id,
+        # Tracecat-specific context nested under a single key.
+        "tracecat": {
+            "workspace_id": str(workspace_id),
+            "organization_id": str(organization_id),
+            "wf_id": str(wf_id),
+            "wf_exec_id": wf_exec_id,
+            "wf_run_id": wf_run_id,
+            "trigger_type": trigger_type,
+            "execution_type": execution_type,
+        },
+        # Provider-specific claim namespaces injected by audience.
+        **_provider_claims(
+            audiences,
+            workspace_id=workspace_id,
+            organization_id=organization_id,
+            wf_id=wf_id,
+            wf_exec_id=wf_exec_id,
+        ),
     }
 
     logger.debug(
@@ -179,8 +234,6 @@ def verify_workflow_identity_token(token: str) -> WorkflowIdentityPayload:
     Raises:
         ValueError: If token is invalid, expired, or missing required claims.
     """
-    from tracecat.auth.workflow_identity_signing import verify_jwt
-
     try:
         payload = verify_jwt(token)
     except PyJWTError as exc:
@@ -195,14 +248,17 @@ def verify_workflow_identity_token(token: str) -> WorkflowIdentityPayload:
     try:
         issued_at = datetime.fromtimestamp(payload["iat"], tz=UTC)
         expires_at = datetime.fromtimestamp(payload["exp"], tz=UTC)
+        tc = payload["tracecat"]
 
         token_payload = WorkflowIdentityPayload(
-            workspace_id=payload["workspace_id"],
-            organization_id=payload["organization_id"],
-            wf_id=payload["wf_id"],
-            wf_exec_id=payload["wf_exec_id"],
-            wf_run_id=payload["wf_run_id"],
-            audiences=payload.get("aud", []),
+            workspace_id=tc["workspace_id"],
+            organization_id=tc["organization_id"],
+            wf_id=tc["wf_id"],
+            wf_exec_id=tc["wf_exec_id"],
+            wf_run_id=tc["wf_run_id"],
+            audiences=(
+                [aud] if isinstance(aud := payload.get("aud", []), str) else aud
+            ),
             issued_at=issued_at,
             expires_at=expires_at,
         )

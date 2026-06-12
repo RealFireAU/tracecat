@@ -33,20 +33,23 @@ def patch_public_api_url():
 
 @pytest.fixture(autouse=True)
 def patch_signing(patch_public_api_url):
-    """Patch workflow identity signing with an ephemeral RSA-2048 key for tests."""
-    from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
+    """Patch workflow identity signing with an ephemeral ES256 key for tests."""
+    from cryptography.hazmat.primitives.asymmetric.ec import (
+        SECP256R1,
+        generate_private_key,
+    )
 
-    private_key = generate_private_key(public_exponent=65537, key_size=2048)
+    private_key = generate_private_key(SECP256R1())
     public_key = private_key.public_key()
 
     import jwt as pyjwt
 
     def fake_mint_jwt(claims):
-        return pyjwt.encode(claims, private_key, algorithm="RS256")
+        return pyjwt.encode(claims, private_key, algorithm="ES256")
 
     def fake_verify_jwt(token, *, audience=None):
         opts = {} if audience is not None else {"verify_aud": False}
-        kwargs = {"algorithms": ["RS256"], "options": opts}
+        kwargs = {"algorithms": ["ES256"], "options": opts}
         if audience is not None:
             kwargs["audience"] = audience
         return pyjwt.decode(token, public_key, **kwargs)
@@ -64,7 +67,7 @@ def _decode(token, public_key):
     import jwt as pyjwt
 
     return pyjwt.decode(
-        token, public_key, algorithms=["RS256"], options={"verify_aud": False}
+        token, public_key, algorithms=["ES256"], options={"verify_aud": False}
     )
 
 
@@ -110,6 +113,11 @@ class TestMintWorkflowIdentityToken:
         payload = _decode(_mint(audiences=audiences), public_key)
         assert payload["aud"] == audiences
 
+    def test_single_audience_is_string(self, patch_signing):
+        _, public_key = patch_signing
+        payload = _decode(_mint(audiences=["api://AzureADTokenExchange"]), public_key)
+        assert payload["aud"] == "api://AzureADTokenExchange"
+
     def test_empty_audiences_default(self, patch_signing):
         _, public_key = patch_signing
         assert _decode(_mint(), public_key)["aud"] == []
@@ -129,14 +137,17 @@ class TestMintWorkflowIdentityToken:
         payload = _decode(_mint(workflow_timeout_seconds=0), public_key)
         assert payload["exp"] - payload["iat"] == WORKFLOW_IDENTITY_DEFAULT_TTL_SECONDS
 
-    def test_custom_claims_present(self, patch_signing):
+    def test_tracecat_claims_nested(self, patch_signing):
         _, public_key = patch_signing
         payload = _decode(_mint(), public_key)
-        assert payload["workspace_id"] == str(WORKSPACE_ID)
-        assert payload["organization_id"] == str(ORGANIZATION_ID)
-        assert payload["wf_id"] == str(WF_ID)
-        assert payload["wf_exec_id"] == WF_EXEC_ID
-        assert payload["wf_run_id"] == WF_RUN_ID
+        tc = payload["tracecat"]
+        assert tc["workspace_id"] == str(WORKSPACE_ID)
+        assert tc["organization_id"] == str(ORGANIZATION_ID)
+        assert tc["wf_id"] == str(WF_ID)
+        assert tc["wf_exec_id"] == WF_EXEC_ID
+        assert tc["wf_run_id"] == WF_RUN_ID
+        assert tc["trigger_type"] == "webhook"
+        assert tc["execution_type"] == "published"
 
     def test_issuer_is_oauth_workflow_url(self, patch_signing, patch_public_api_url):
         _, public_key = patch_signing
@@ -144,19 +155,42 @@ class TestMintWorkflowIdentityToken:
         payload = _decode(_mint(), public_key)
         assert payload["iss"] == "https://api.example.com/oauth/workflow"
 
-    def test_subject_urn_format(self, patch_signing):
+    def test_subject_static_urn_format(self, patch_signing):
         _, public_key = patch_signing
         payload = _decode(
             _mint(trigger_type="webhook", execution_type="published"), public_key
         )
-        expected = (
-            f"urn:org:{ORGANIZATION_ID}"
-            f":ws:{WORKSPACE_ID}"
-            f":wf:{WF_ID}"
-            f":webhook:published"
-            f":exec:{WF_EXEC_ID}"
-        )
+        expected = f"urn:org:{ORGANIZATION_ID}:ws:{WORKSPACE_ID}:wf:{WF_ID}"
         assert payload["sub"] == expected
+
+    def test_jti_is_unique(self, patch_signing):
+        _, public_key = patch_signing
+        t1 = _decode(_mint(), public_key)
+        t2 = _decode(_mint(), public_key)
+        assert t1["jti"] != t2["jti"]
+
+    def test_nbf_equals_iat(self, patch_signing):
+        _, public_key = patch_signing
+        payload = _decode(_mint(), public_key)
+        assert payload["nbf"] == payload["iat"]
+
+    def test_aws_sts_principal_tags_injected(self, patch_signing):
+        _, public_key = patch_signing
+        payload = _decode(_mint(audiences=["sts.amazonaws.com"]), public_key)
+        tags = payload["https://aws.amazon.com/tags"]
+        assert "WorkflowId" in tags["principal_tags"]
+        assert "WorkspaceId" in tags["principal_tags"]
+        assert set(tags["transitive_tag_keys"]) == {
+            "WorkspaceId",
+            "OrganizationId",
+            "WorkflowId",
+            "ExecutionId",
+        }
+
+    def test_aws_sts_tags_not_injected_for_other_audiences(self, patch_signing):
+        _, public_key = patch_signing
+        payload = _decode(_mint(audiences=["api://AzureADTokenExchange"]), public_key)
+        assert "https://aws.amazon.com/tags" not in payload
 
 
 class TestVerifyWorkflowIdentityToken:
@@ -175,10 +209,13 @@ class TestVerifyWorkflowIdentityToken:
 
     def test_verify_wrong_key_raises(self, patch_signing):
         import jwt as pyjwt
-        from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
+        from cryptography.hazmat.primitives.asymmetric.ec import (
+            SECP256R1,
+            generate_private_key,
+        )
 
-        wrong_key = generate_private_key(public_exponent=65537, key_size=2048)
-        bad_token = pyjwt.encode({"iss": "x"}, wrong_key, algorithm="RS256")
+        wrong_key = generate_private_key(SECP256R1())
+        bad_token = pyjwt.encode({"iss": "x"}, wrong_key, algorithm="ES256")
         with pytest.raises(ValueError, match="Invalid workflow identity token"):
             verify_workflow_identity_token(bad_token)
 
@@ -193,14 +230,18 @@ class TestVerifyWorkflowIdentityToken:
                 "aud": [],
                 "iat": 1,
                 "exp": 1,
-                "workspace_id": str(WORKSPACE_ID),
-                "organization_id": str(ORGANIZATION_ID),
-                "wf_id": str(WF_ID),
-                "wf_exec_id": WF_EXEC_ID,
-                "wf_run_id": WF_RUN_ID,
+                "tracecat": {
+                    "workspace_id": str(WORKSPACE_ID),
+                    "organization_id": str(ORGANIZATION_ID),
+                    "wf_id": str(WF_ID),
+                    "wf_exec_id": WF_EXEC_ID,
+                    "wf_run_id": WF_RUN_ID,
+                    "trigger_type": "manual",
+                    "execution_type": "draft",
+                },
             },
             private_key,
-            algorithm="RS256",
+            algorithm="ES256",
         )
         with pytest.raises(ValueError, match="Invalid workflow identity token"):
             verify_workflow_identity_token(bad_token)
@@ -216,14 +257,10 @@ class TestVerifyWorkflowIdentityToken:
                 "aud": [],
                 "iat": 1,
                 "exp": 9999999999,
-                "workspace_id": str(WORKSPACE_ID),
-                "organization_id": str(ORGANIZATION_ID),
-                "wf_id": str(WF_ID),
-                "wf_exec_id": WF_EXEC_ID,
-                # wf_run_id intentionally omitted
+                # "tracecat" claim intentionally omitted
             },
             private_key,
-            algorithm="RS256",
+            algorithm="ES256",
         )
         with pytest.raises(ValueError, match="Invalid workflow identity token"):
             verify_workflow_identity_token(bad_token)
@@ -234,7 +271,7 @@ class TestVerifyWorkflowIdentityToken:
         assert result.audiences == audiences
 
     def test_verify_timestamps(self, patch_signing):
-        before = datetime.now(UTC)
+        before = datetime.now(UTC).replace(microsecond=0)
         token = _mint()
         after = datetime.now(UTC)
         result = verify_workflow_identity_token(token)
@@ -256,10 +293,3 @@ class TestWorkflowIdentityPayload:
     def test_issuer_is_oauth_workflow_url(self, patch_public_api_url):
         patch_public_api_url.TRACECAT__PUBLIC_API_URL = "https://api.example.com"
         assert self._make().issuer == "https://api.example.com/oauth/workflow"
-
-    def test_subject_contains_wf_info(self, patch_public_api_url):
-        patch_public_api_url.TRACECAT__PUBLIC_API_URL = "https://api.example.com"
-        subject = self._make().subject
-        assert "api.example.com/oauth/workflow/workflows/" in subject
-        assert str(ORGANIZATION_ID) in subject
-        assert str(WF_ID) in subject

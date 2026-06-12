@@ -113,7 +113,8 @@
                 "pages": [
                   "automations/integrations/prebuilt-credentials",
                   "automations/integrations/oauth-integrations",
-                  "automations/integrations/mcp-integrations"
+                  "automations/integrations/mcp-integrations",
+                  "automations/integrations/workload-identity"
                 ]
               },
               "automations/cases",

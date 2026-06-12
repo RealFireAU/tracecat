@@ -36,7 +36,7 @@ async def openid_configuration() -> dict[str, Any]:
     return {
         "issuer": issuer,
         "jwks_uri": f"{issuer}/.well-known/jwks.json",
-        "id_token_signing_alg_values_supported": ["RS256"],
+        "id_token_signing_alg_values_supported": ["ES256"],
         "subject_types_supported": ["public"],
         "response_types_supported": ["token"],
         "claims_supported": [
@@ -44,17 +44,23 @@ async def openid_configuration() -> dict[str, Any]:
             "sub",
             "aud",
             "iat",
+            "nbf",
             "exp",
-            "workspace_id",
-            "organization_id",
-            "wf_id",
-            "wf_exec_id",
-            "wf_run_id",
+            "jti",
+            # Tracecat-specific claims nested under the "tracecat" key
+            "tracecat",
+            "tracecat.workspace_id",
+            "tracecat.organization_id",
+            "tracecat.wf_id",
+            "tracecat.wf_exec_id",
+            "tracecat.wf_run_id",
+            "tracecat.trigger_type",
+            "tracecat.execution_type",
         ],
     }
 
 
 @router.get("/.well-known/jwks.json")
 async def jwks() -> dict[str, list[dict[str, str]]]:
-    """JSON Web Key Set containing the RS256 public key for workflow identity tokens."""
+    """JSON Web Key Set containing the ES256 public key for workflow identity tokens."""
     return {"keys": [get_public_jwk()]}

@@ -470,12 +470,25 @@ class RunContext(BaseModel):
     logical_time: datetime
     """The logical start time for the workflow run."""
 
-    workflow_identity_token: str | None = Field(
+    identity_enabled: bool = Field(
+        default=False,
+        description="Whether to mint a workflow identity token for this execution.",
+    )
+    identity_audiences: list[str] = Field(
+        default_factory=list,
+        description="Audiences for the workflow identity token.",
+    )
+    identity_timeout_seconds: float | None = Field(
         default=None,
-        description=(
-            "JWT token for external IDP trust, if workflow has identity config enabled. "
-            "This token is available to actions via ENV.workflow.identity_token."
-        ),
+        description="Token lifetime gated to the workflow execution timeout.",
+    )
+    identity_trigger_type: str = Field(
+        default="manual",
+        description="How the workflow was triggered (e.g. webhook, scheduled).",
+    )
+    identity_execution_type: str = Field(
+        default="draft",
+        description="Draft or published execution.",
     )
 
     @field_validator("wf_id", mode="before")

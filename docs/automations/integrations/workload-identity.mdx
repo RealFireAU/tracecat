@@ -1,0 +1,173 @@
+---
+title: Workload identity
+description: Mint short-lived, cryptographically signed JWTs for secretless authentication with external identity providers such as Microsoft Entra, AWS STS, and GCP.
+---
+
+## Overview
+
+Workload identity lets a Tracecat workflow prove its identity to an external identity provider (IDP) without storing long-lived credentials. When enabled, each workflow execution mints a signed JWT scoped to that execution. Actions can exchange this token for a provider-issued access token using [RFC 8693 token exchange](https://datatracker.ietf.org/doc/html/rfc8693).
+
+**How it works:**
+
+1. Workflow execution starts with workload identity enabled.
+2. The executor mints a short-lived ES256-signed JWT and injects it into `ENV.workflow.identity_token`.
+3. An action exchanges the JWT with the IDP for a provider access token.
+4. Subsequent actions use the provider access token to call provider APIs.
+
+The identity token is automatically masked in action outputs and Temporal event history — it will appear as `***` in the UI.
+
+## Enable workload identity
+
+Open **Workflow settings** and toggle on **Workload identity**.
+
+![Workload identity toggle disabled](/img/integrations/workload-identity-toggle-off.png)
+
+Once enabled, an **IDP audiences** field appears. Add one audience URL per IDP you want to trust the token. Press Enter after each URL.
+
+![Workload identity toggle enabled with IDP audiences field](/img/integrations/workload-identity-toggle-on.png)
+
+Common audience values:
+
+| Provider | Audience |
+|---|---|
+| Microsoft Entra | `api://AzureADTokenExchange` |
+| AWS STS | `sts.amazonaws.com` |
+| GCP | `//iam.googleapis.com/projects/{project}/locations/global/workloadIdentityPools/{pool}/providers/{provider}` |
+
+## Access the token in actions
+
+The token is available via the expression `${{ ENV.workflow.identity_token }}` in any action input.
+
+![Action input referencing ENV.workflow.identity_token](/img/integrations/workload-identity-action-input.png)
+
+When the workflow runs, this expression resolves to the signed JWT. In the flat output view the value is redacted as `***`.
+
+![Token masked as *** in flat output view](/img/integrations/workload-identity-masked.png)
+
+## Token structure
+
+The JWT contains standard OIDC claims plus a nested `tracecat` object with execution context:
+
+```json
+{
+  "iss": "https://your-tracecat-instance/api/oauth/workflow",
+  "sub": "urn:org:{organization_id}:ws:{workspace_id}:wf:{workflow_id}",
+  "aud": "api://AzureADTokenExchange",
+  "iat": 1234567890,
+  "nbf": 1234567890,
+  "exp": 1234568490,
+  "jti": "unique-token-id",
+  "tracecat": {
+    "organization_id": "...",
+    "workspace_id": "...",
+    "wf_id": "...",
+    "wf_exec_id": "...",
+    "wf_run_id": "...",
+    "trigger_type": "manual",
+    "execution_type": "draft"
+  }
+}
+```
+
+The `sub` claim is stable per workflow (not per execution), which makes it suitable as a fixed subject in federated credential configurations.
+
+Token lifetime is gated to the workflow's execution timeout. If no timeout is set, the default TTL is 10 minutes.
+
+## OIDC discovery
+
+Tracecat exposes a standard OIDC discovery document and JWKS endpoint so external IDPs can validate tokens:
+
+| Endpoint | URL |
+|---|---|
+| Discovery document | `{PUBLIC_API_URL}/oauth/workflow/.well-known/openid-configuration` |
+| JWKS | `{PUBLIC_API_URL}/oauth/workflow/.well-known/jwks.json` |
+
+These endpoints are public and do not require authentication.
+
+## Microsoft Entra setup
+
+### 1. Create an app registration
+
+In the [Azure portal](https://portal.azure.com), go to **Microsoft Entra ID → App registrations → New registration**. Note the **Application (client) ID** and **Directory (tenant) ID**.
+
+### 2. Add a federated credential
+
+Go to **Certificates & secrets → Federated credentials → Add credential**.
+
+![Azure Entra federated credentials list](/img/integrations/workload-identity-entra-federated-creds.png)
+
+Configure the credential:
+
+![Azure Entra federated credential configuration form](/img/integrations/workload-identity-entra-credential-config.png)
+
+| Field | Value |
+|---|---|
+| Federated credential scenario | Other issuer |
+| Issuer | `https://your-tracecat-instance/api/oauth/workflow` |
+| Type | Explicit subject identifier |
+| Value | Copy the `sub` claim from a test run's **Return Payload** output, or construct it: `urn:org:{org_id}:ws:{workspace_id}:wf:{workflow_id}` |
+| Audience | `api://AzureADTokenExchange` |
+
+### 3. Grant API permissions
+
+In the app registration, go to **API permissions** and add the Microsoft Graph or Azure permissions your workflow needs.
+
+### 4. Exchange the token in a workflow
+
+Use the **Microsoft Entra: Exchange workload identity token** action, or build the exchange manually with `core.http_request`:
+
+```yaml
+- ref: exchange_token
+  action: core.http_request
+  args:
+    url: https://login.microsoftonline.com/${{ inputs.tenant_id }}/oauth2/v2.0/token
+    method: POST
+    form_data:
+      grant_type: client_credentials
+      client_id: ${{ inputs.client_id }}
+      client_assertion_type: urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+      client_assertion: ${{ ENV.workflow.identity_token }}
+      scope: https://graph.microsoft.com/.default
+```
+
+Pass the resulting `access_token` as a Bearer token to downstream Graph API actions:
+
+```yaml
+- ref: call_graph
+  action: core.http_request
+  args:
+    url: https://graph.microsoft.com/v1.0/...
+    method: GET
+    headers:
+      Authorization: Bearer ${{ steps.exchange_token.result.data.access_token }}
+```
+
+![Successful Graph API response using workload identity](/img/integrations/workload-identity-graph-response.png)
+
+## AWS STS setup
+
+Add `sts.amazonaws.com` as an IDP audience. Tracecat automatically injects the `https://aws.amazon.com/tags` claim namespace required by `AssumeRoleWithWebIdentity`, populated with `WorkspaceId`, `OrganizationId`, `WorkflowId`, and `ExecutionId` as session tags.
+
+Configure your IAM role's trust policy to validate the issuer and subject:
+
+```json
+{
+  "Effect": "Allow",
+  "Principal": {
+    "Federated": "arn:aws:iam::{account_id}:oidc-provider/your-tracecat-instance/api/oauth/workflow"
+  },
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": {
+    "StringEquals": {
+      "your-tracecat-instance/api/oauth/workflow:aud": "sts.amazonaws.com",
+      "your-tracecat-instance/api/oauth/workflow:sub": "urn:org:{org_id}:ws:{workspace_id}:wf:{workflow_id}"
+    }
+  }
+}
+```
+
+## Workflow result
+
+The workflow result only contains execution metadata — the identity token and its configuration are never included in the output.
+
+![Workflow result showing clean execution metadata](/img/integrations/workload-identity-workflow-result.png)
