@@ -76,6 +76,7 @@ from tracecat.auth.users import (
     auth_backend,
     fastapi_users,
 )
+from tracecat.auth.workflow_identity_oidc import router as workflow_identity_oidc_router
 from tracecat.authz.rbac.router import roles_router as rbac_roles_read_router
 from tracecat.authz.rbac.router import (
     user_assignments_router as rbac_user_assignments_router,
@@ -566,6 +567,7 @@ def create_app(**kwargs) -> FastAPI:
     _include_workspace_scoped_router(app, providers_router)
     _include_workspace_scoped_router(app, mcp_router)
     app.include_router(mcp_oidc_router)
+    app.include_router(workflow_identity_oidc_router)
     app.include_router(feature_flags_router)
     app.include_router(vcs_router)
     # RBAC routers - user scopes + role listing + user role assignments are always included (OSS)

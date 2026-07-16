@@ -846,6 +846,8 @@ import type {
   WorkflowExecutionsSearchWorkflowExecutionsResponse,
   WorkflowExecutionsTerminateWorkflowExecutionData,
   WorkflowExecutionsTerminateWorkflowExecutionResponse,
+  WorkflowIdentityOidcJwksResponse,
+  WorkflowIdentityOidcOpenidConfigurationResponse,
   WorkflowsAddTagData,
   WorkflowsAddTagResponse,
   WorkflowsCommitWorkflowData,
@@ -11953,6 +11955,38 @@ export const mcpIntegrationsDisconnectMcpIntegration = (
     },
   })
 }
+
+/**
+ * Openid Configuration
+ * OIDC discovery document for workflow identity tokens.
+ *
+ * External IDPs fetch this to learn the JWKS URI and issuer, then use
+ * the public key from JWKS to validate workflow identity tokens before
+ * issuing their own access tokens.
+ * @returns unknown Successful Response
+ * @throws ApiError
+ */
+export const workflowIdentityOidcOpenidConfiguration =
+  (): CancelablePromise<WorkflowIdentityOidcOpenidConfigurationResponse> => {
+    return __request(OpenAPI, {
+      method: "GET",
+      url: "/oauth/workflow/.well-known/openid-configuration",
+    })
+  }
+
+/**
+ * Jwks
+ * JSON Web Key Set containing the ES256 public key for workflow identity tokens.
+ * @returns string Successful Response
+ * @throws ApiError
+ */
+export const workflowIdentityOidcJwks =
+  (): CancelablePromise<WorkflowIdentityOidcJwksResponse> => {
+    return __request(OpenAPI, {
+      method: "GET",
+      url: "/oauth/workflow/.well-known/jwks.json",
+    })
+  }
 
 /**
  * Get Feature Flags

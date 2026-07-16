@@ -681,6 +681,26 @@ async def prepare_resolved_context(
     context["SECRETS"] = secrets
     context["VARS"] = workspace_variables
 
+    # Mint workflow identity token on the executor (outside Temporal sandbox).
+    # Must happen before evaluate_templated_args so ENV.workflow.identity_token resolves.
+    run_context = input.run_context
+    if run_context.identity_enabled:
+        from tracecat.auth.workflow_identities import mint_workflow_identity_token
+
+        workflow_identity_token = mint_workflow_identity_token(
+            workspace_id=role.workspace_id,
+            organization_id=role.organization_id,
+            wf_id=run_context.wf_id,
+            wf_exec_id=str(run_context.wf_exec_id),
+            wf_run_id=str(run_context.wf_run_id),
+            trigger_type=run_context.identity_trigger_type,
+            execution_type=run_context.identity_execution_type,
+            audiences=run_context.identity_audiences,
+            workflow_timeout_seconds=run_context.identity_timeout_seconds,
+        )
+        env_ctx: dict[str, Any] = context.setdefault(ExprContext.ENV, {})  # type: ignore[arg-type]
+        env_ctx.setdefault("workflow", {})["identity_token"] = workflow_identity_token
+
     # Extract and set logical_time BEFORE evaluating args
     # This ensures FN.now(), FN.utcnow(), FN.today() use the deterministic time
     env_context = context.get(ExprContext.ENV) or {}
@@ -729,6 +749,10 @@ async def prepare_resolved_context(
         mask_values = None
     else:
         mask_values = set(secret_projection.mask_values)
+
+    # Add minted identity token to mask set so it's redacted from outputs.
+    if run_context.identity_enabled and mask_values is not None:
+        mask_values.add(context[ExprContext.ENV]["workflow"]["identity_token"])
 
     # Generate executor token for SDK authentication
     executor_token = mint_executor_token(

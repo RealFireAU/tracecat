@@ -1,0 +1,48 @@
+type: action
+definition:
+  title: Exchange workload identity token
+  description: >
+    Exchange a Tracecat workflow identity JWT for a Microsoft Entra access token
+    via workload identity federation (RFC 8693). The resulting token can be used
+    as a Bearer token in downstream Microsoft Graph or Azure Resource Manager calls.
+
+    Prerequisites:
+    - Workflow identity must be enabled on the workflow (Settings > Identity).
+    - Audience ``api://AzureADTokenExchange`` must be added to the workflow's IDP audiences.
+    - An Entra app registration with a federated credential must be configured to trust
+      tokens issued by this Tracecat instance for the workflow's subject URN.
+
+    The workload identity token is available via ``${{ ENV.workflow.identity_token }}``.
+  display_group: Microsoft Entra
+  doc_url: https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation
+  namespace: tools.microsoft_entra
+  name: exchange_workload_identity_token
+  expects:
+    tenant_id:
+      type: str
+      description: Azure AD tenant ID.
+    client_id:
+      type: str
+      description: App registration client ID configured with the federated credential.
+    scope:
+      type: str
+      description: OAuth 2.0 scope to request (e.g. https://graph.microsoft.com/.default).
+      default: https://graph.microsoft.com/.default
+    workflow_identity_token:
+      type: str
+      description: >
+        Workflow identity JWT to exchange. Defaults to the current execution's token.
+      default: ${{ ENV.workflow.identity_token }}
+  steps:
+    - ref: exchange_token
+      action: core.http_request
+      args:
+        url: https://login.microsoftonline.com/${{ inputs.tenant_id }}/oauth2/v2.0/token
+        method: POST
+        form_data:
+          grant_type: client_credentials
+          client_id: ${{ inputs.client_id }}
+          client_assertion_type: urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+          client_assertion: ${{ inputs.workflow_identity_token }}
+          scope: ${{ inputs.scope }}
+  returns: ${{ steps.exchange_token.result.data.access_token }}

@@ -384,6 +384,30 @@ class ActionStatement(BaseModel):
         return self
 
 
+class WorkflowIdentityConfig(BaseModel):
+    """Configuration for issuing a workflow identity token for external IDP trust.
+
+    When enabled, Tracecat mints a JWT that external identity providers
+    (Azure Entra, AWS STS, GCP, etc.) can validate and exchange for access tokens.
+
+    The token is available to actions via ENV.workflow.identity_token.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to mint and inject a workflow identity token for this execution",
+    )
+    audiences: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Audiences included in the aud claim for external IDP token exchange. "
+            "Azure Entra: 'api://AzureADTokenExchange'. "
+            "AWS STS: 'sts.amazonaws.com'. "
+            "GCP: use the workload identity pool provider resource name."
+        ),
+    )
+
+
 class DSLConfig(BaseModel):
     """This is the runtime configuration for the workflow.
 
@@ -408,6 +432,10 @@ class DSLConfig(BaseModel):
         description="Workflow timeout in seconds. If set to 0, the workflow has no timeout.",
     )
     """Workflow timeout in seconds. If set to 0, the workflow has no timeout."""
+    identity: WorkflowIdentityConfig = Field(
+        default_factory=WorkflowIdentityConfig,
+        description="Workflow identity token configuration for external IDP trust",
+    )
 
 
 class Trigger(BaseModel):
@@ -441,6 +469,27 @@ class RunContext(BaseModel):
     environment: str
     logical_time: datetime
     """The logical start time for the workflow run."""
+
+    identity_enabled: bool = Field(
+        default=False,
+        description="Whether to mint a workflow identity token for this execution.",
+    )
+    identity_audiences: list[str] = Field(
+        default_factory=list,
+        description="Audiences for the workflow identity token.",
+    )
+    identity_timeout_seconds: float | None = Field(
+        default=None,
+        description="Token lifetime gated to the workflow execution timeout.",
+    )
+    identity_trigger_type: str = Field(
+        default="manual",
+        description="How the workflow was triggered (e.g. webhook, scheduled).",
+    )
+    identity_execution_type: str = Field(
+        default="draft",
+        description="Draft or published execution.",
+    )
 
     @field_validator("wf_id", mode="before")
     @classmethod
